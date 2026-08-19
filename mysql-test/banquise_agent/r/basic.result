@@ -1,0 +1,42 @@
+SELECT PLUGIN_NAME, PLUGIN_STATUS, PLUGIN_TYPE
+FROM INFORMATION_SCHEMA.PLUGINS
+WHERE PLUGIN_NAME = 'BANQUISE_AGENT';
+PLUGIN_NAME	PLUGIN_STATUS	PLUGIN_TYPE
+BANQUISE_AGENT	ACTIVE	INFORMATION SCHEMA
+SHOW COLUMNS FROM INFORMATION_SCHEMA.BANQUISE_AGENT;
+Field	Type	Null	Key	Default	Extra
+NAME	varchar(128)	NO		NULL	
+REPOSITORY	varchar(1024)	NO		NULL	
+PLUGIN_VERSION	varchar(64)	NO		NULL	
+INSTALLED	varchar(3)	NO		NULL	
+LOADED	varchar(3)	NO		NULL	
+INSTALLED_VERSION	varchar(255)	NO		NULL	
+PLUGIN_TYPES	varchar(1024)	NO		NULL	
+LICENSE	varchar(255)	NO		NULL	
+MATURITY	varchar(255)	NO		NULL	
+DESCRIPTION	varchar(2048)	NO		NULL	
+MARIADB_VERSION	varchar(64)	NO		NULL	
+ARCHITECTURE	varchar(64)	NO		NULL	
+SONAME	varchar(128)	NO		NULL	
+DOWNLOAD_URL	varchar(2048)	NO		NULL	
+SHA256	varchar(64)	NO		NULL	
+ARCHIVE_TYPE	varchar(16)	NO		NULL	
+ARCHIVE_MEMBER	varchar(1024)	NO		NULL	
+DEPENDENCIES	varchar(1024)	NO		NULL	
+COMPATIBLE	varchar(3)	NO		NULL	
+SHOW STATUS LIKE 'banquise_agent_message';
+Variable_name	Value
+Banquise_agent_message	Agent is disabled
+SHOW VARIABLES LIKE 'banquise_agent_%';
+Variable_name	Value
+banquise_agent_catalog_url	
+banquise_agent_connect_timeout	10
+banquise_agent_controller_url	
+banquise_agent_enabled	OFF
+banquise_agent_enrollment_token_file	/etc/banquise/enrollment.token
+banquise_agent_poll_interval	60
+banquise_agent_refresh	OFF
+banquise_agent_server_uid	
+banquise_agent_state_file	/var/lib/mysql/banquise-agent.state
+banquise_agent_transfer_timeout	120
+banquise_agent_trusted_key_file	/etc/banquise/catalog.pub

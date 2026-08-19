@@ -1,0 +1,2 @@
+--plugin-load-add=banquise_agent
+--loose-banquise-agent-enabled=OFF
