@@ -1,0 +1,26 @@
+name: Build and package BANQUISE_AGENT plugin
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: lefred/mariadb-plugin-ci/.github/workflows/build-plugin.yml@v1
+    with:
+      plugin_name: banquise-agent
+      plugin_directory: banquise_agent
+      build_target: banquise_agent
+      plugin_library: banquise_agent.so
+      cmake_options: -DPLUGIN_CRYPTO_EXTRA=DYNAMIC
+      test_suite: banquise_agent
+      run_tests: ${{ startsWith(github.ref, 'refs/tags/v') }}
