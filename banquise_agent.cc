@@ -742,9 +742,9 @@ static bool catalog_entry(const std::string &name, Repo_entry *selected,
     if (e.name == name && compatible(e))
     {
       *selected= e;
-      if (e.soname == "banquise_agent.so")
+      if (e.soname == "banquise_agent.so" || e.soname == "banquise_lite.so")
       {
-        *error= "The repository plugin cannot manage itself";
+        *error= "Banquise Agent cannot manage itself or banquise_lite";
         return false;
       }
       return true;
@@ -1481,11 +1481,16 @@ static int fill_table(THD *thd, TABLE_LIST *tables, COND *)
   return 0;
 }
 
-static int table_init(void *p)
+static int schema_init(void *p)
 {
   ST_SCHEMA_TABLE *schema= static_cast<ST_SCHEMA_TABLE *>(p);
   schema->fields_info= Show::fields;
   schema->fill_table= fill_table;
+  return 0;
+}
+
+static int agent_init(void *)
+{
   if (curl_global_init(CURL_GLOBAL_DEFAULT)) return 1;
   agent_shutdown= false;
   try { agent_thread= std::thread(agent_main); }
@@ -1494,7 +1499,7 @@ static int table_init(void *p)
   return 0;
 }
 
-static int plugin_deinit(void *)
+static int agent_deinit(void *)
 {
   {
     std::lock_guard<std::mutex> guard(agent_sleep_lock);
@@ -1508,6 +1513,8 @@ static int plugin_deinit(void *)
 
 static st_mysql_information_schema descriptor=
   { MYSQL_INFORMATION_SCHEMA_INTERFACE_VERSION };
+static st_mysql_daemon daemon_descriptor=
+  { MYSQL_DAEMON_INTERFACE_VERSION };
 
 enum Repo_action { ACTION_INSTALL, ACTION_UNINSTALL, ACTION_UPDATE };
 
@@ -1618,20 +1625,28 @@ static Plugin_function uninstall_function_descriptor(
 static Plugin_function update_function_descriptor(
   &Create_func_banquise_agent_action<ACTION_UPDATE>::singleton);
 
+#define BANQUISE_AGENT_ENTRY_VARS(TYPE, DESC, NAME, TEXT, INIT, DEINIT, STATUS, VARS) \
+ { TYPE, DESC, NAME, "lefred", TEXT, PLUGIN_LICENSE_GPL, INIT, DEINIT, \
+   BANQUISE_AGENT_VERSION, STATUS, VARS, "0.1.0", \
+   MariaDB_PLUGIN_MATURITY_EXPERIMENTAL }
+#define BANQUISE_AGENT_ENTRY(TYPE, DESC, NAME, TEXT) \
+ BANQUISE_AGENT_ENTRY_VARS(TYPE, DESC, NAME, TEXT, NULL, NULL, NULL, NULL)
+
 maria_declare_plugin(banquise_agent)
-{
-  MYSQL_INFORMATION_SCHEMA_PLUGIN,
-  &descriptor,
-  "BANQUISE_AGENT",
-  "lefred",
-  "Banquise signed-catalog fleet agent for MariaDB plugins",
-  PLUGIN_LICENSE_GPL,
-  table_init,
-  plugin_deinit,
-  BANQUISE_AGENT_VERSION,
-  repo_status,
-  repo_vars,
-  "0.1.0",
-  MariaDB_PLUGIN_MATURITY_EXPERIMENTAL
-}
+  BANQUISE_AGENT_ENTRY_VARS(MYSQL_INFORMATION_SCHEMA_PLUGIN, &descriptor,
+                            "BANQUISE_CATALOG",
+                            "Signed catalog view for the Banquise fleet agent",
+                            schema_init, NULL, NULL, NULL),
+  BANQUISE_AGENT_ENTRY_VARS(MYSQL_DAEMON_PLUGIN, &daemon_descriptor,
+                            "BANQUISE_AGENT", "Banquise fleet controller agent",
+                            agent_init, agent_deinit, repo_status, repo_vars),
+  BANQUISE_AGENT_ENTRY(MariaDB_FUNCTION_PLUGIN, &install_function_descriptor,
+                       "banquise_agent_install", "Install and load a catalog plugin"),
+  BANQUISE_AGENT_ENTRY(MariaDB_FUNCTION_PLUGIN, &uninstall_function_descriptor,
+                       "banquise_agent_uninstall", "Unload and remove a catalog plugin"),
+  BANQUISE_AGENT_ENTRY(MariaDB_FUNCTION_PLUGIN, &update_function_descriptor,
+                       "banquise_agent_update", "Update a catalog plugin")
 maria_declare_plugin_end;
+
+#undef BANQUISE_AGENT_ENTRY
+#undef BANQUISE_AGENT_ENTRY_VARS

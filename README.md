@@ -1,7 +1,9 @@
 # Banquise MariaDB agent - mariadb-plugin-banquise-agent
 
+![mariabd-plugin-banquise-agent](logo/banquise_agent_logo.png)
+
 `banquise_agent` is the pull-based MariaDB component of Banquise. It maintains
-an `INFORMATION_SCHEMA.BANQUISE_AGENT` catalog view, registers once with the
+an `INFORMATION_SCHEMA.BANQUISE_CATALOG` catalog view, registers once with the
 control plane, heartbeats with MariaDB/OS/architecture and observed plugin
 state, and executes typed signed-catalog tasks queued by an administrator.
 
@@ -52,5 +54,22 @@ Runtime controls:
 SET GLOBAL banquise_agent_enabled=OFF;
 SET GLOBAL banquise_agent_poll_interval=300;
 SHOW STATUS LIKE 'banquise_agent_message';
-SELECT * FROM information_schema.banquise_agent;
+SELECT * FROM information_schema.banquise_catalog;
+```
+
+`banquise_agent` and `banquise_lite` are mutually exclusive. Both modules
+register the `BANQUISE_CATALOG` information-schema component, so MariaDB rejects
+an attempt to install the second module before any of its service components
+are activated. Neither module can manage the other's shared object as a catalog
+plugin.
+
+When upgrading from an Agent build that exposed
+`INFORMATION_SCHEMA.BANQUISE_AGENT`, uninstall that old module before replacing
+the shared object, then install the new module so MariaDB persists both the
+`BANQUISE_CATALOG` table component and the `BANQUISE_AGENT` daemon component:
+
+```sql
+UNINSTALL SONAME 'banquise_agent';
+-- replace banquise_agent.so
+INSTALL SONAME 'banquise_agent';
 ```
