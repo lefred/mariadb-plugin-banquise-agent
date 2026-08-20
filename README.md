@@ -29,8 +29,8 @@ Dependencies are libcurl, libarchive, and OpenSSL development headers.
 [mariadb]
 plugin_load_add=banquise_agent
 banquise_agent_controller_url=https://banquise.example.com
-banquise_agent_trusted_key_file=/etc/banquise/catalog.pub
-banquise_agent_enrollment_token_file=/etc/banquise/enrollment.token
+banquise_agent_trusted_key_file=/etc/mariadb/banquise/catalog.pub
+banquise_agent_enrollment_token_file=/etc/mariadb/banquise/enrollment.token
 banquise_agent_state_file=/var/lib/mysql/banquise-agent.state
 banquise_agent_poll_interval=60
 banquise_agent_enabled=ON

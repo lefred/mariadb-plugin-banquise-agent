@@ -1315,14 +1315,14 @@ static MYSQL_SYSVAR_STR(catalog_url, catalog_url,
 static MYSQL_SYSVAR_STR(trusted_key_file, trusted_key_file,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY | PLUGIN_VAR_MEMALLOC,
   "Local Minisign public key used to authenticate catalogs", NULL, NULL,
-  "/etc/banquise/catalog.pub");
+  "/etc/mariadb/banquise/catalog.pub");
 static MYSQL_SYSVAR_STR(controller_url, controller_url,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY | PLUGIN_VAR_MEMALLOC,
   "Banquise control-plane HTTPS base URL", NULL, NULL, "");
 static MYSQL_SYSVAR_STR(enrollment_token_file, enrollment_token_file,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY | PLUGIN_VAR_MEMALLOC,
   "Root-owned file containing the one-time enrollment token", NULL, NULL,
-  "/etc/banquise/enrollment.token");
+  "/etc/mariadb/banquise/enrollment.token");
 static MYSQL_SYSVAR_STR(state_file, state_file,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY | PLUGIN_VAR_MEMALLOC,
   "Mode-0600 persistent agent identity and credential file", NULL, NULL,
