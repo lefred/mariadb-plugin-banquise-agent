@@ -39,4 +39,4 @@ banquise_agent_refresh	OFF
 banquise_agent_server_uid	
 banquise_agent_state_file	/var/lib/mysql/banquise-agent.state
 banquise_agent_transfer_timeout	120
-banquise_agent_trusted_key_file	/etc/mariabd/banquise/catalog.pub
+banquise_agent_trusted_key_file	/etc/mariadb/banquise/catalog.pub
