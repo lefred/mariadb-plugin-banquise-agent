@@ -4,3 +4,12 @@ SELECT PLUGIN_NAME, PLUGIN_STATUS, PLUGIN_TYPE
 SHOW COLUMNS FROM INFORMATION_SCHEMA.BANQUISE_CATALOG;
 SHOW STATUS LIKE 'banquise_agent_message';
 SHOW VARIABLES LIKE 'banquise_agent_%';
+
+--error ER_UNKNOWN_ERROR
+SELECT banquise_agent_install('vmstat', 'community');
+
+--error ER_UNKNOWN_ERROR
+SELECT banquise_agent_install('vmstat', NULL);
+
+--error ER_UNKNOWN_ERROR
+SELECT banquise_agent_install('vmstat', '');

@@ -50,9 +50,11 @@
 #define MAX_PUBLIC_KEY_BYTES (4U * 1024U)
 
 extern char server_version[];
+#include "banquise_repositories.h"
 
 struct Repo_entry
 {
+  std::string catalog;
   std::string name, repository, version, mariadb_version, architecture;
   std::string soname, download_url, sha256, archive_type, archive_member;
   std::string plugin_types, license, maturity, description, dependencies, message;
@@ -61,12 +63,12 @@ struct Repo_entry
 static std::mutex repo_lock;
 static std::mutex operation_lock;
 static std::vector<Repo_entry> entries;
-static char *catalog_url;
-static char *trusted_key_file;
 static char *controller_url;
 static char *enrollment_token_file;
 static char *state_file;
 static char *configured_server_uid;
+static char *trusted_keys_dir;
+static std::vector<Banquise_repository> controller_repositories;
 static my_bool refresh_command;
 static my_bool agent_enabled= 1;
 static char status_message[2048]= "Catalog has not been refreshed";
@@ -254,14 +256,15 @@ static bool controller_post(const std::string &path, const std::string &body,
   return true;
 }
 
-static bool read_trusted_key(std::string *contents, std::string *error)
+static bool read_trusted_key(std::string *contents, std::string *error,
+                             const char *key_file)
 {
-  if (!trusted_key_file || !trusted_key_file[0])
+  if (!key_file || !key_file[0])
   {
-    *error= "Set banquise_agent_trusted_key_file to a local Minisign public key";
+    *error= "Repository trusted_key_file must name a local Minisign public key";
     return false;
   }
-  int fd= open(trusted_key_file, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  int fd= open(key_file, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0)
   {
     *error= std::string("Cannot open trusted Minisign key: ") + strerror(errno);
@@ -616,35 +619,93 @@ static bool plugin_payload(const Repo_entry &entry, const std::string &asset,
   return true;
 }
 
-static bool refresh_from(const std::string &url, std::string *error)
+// Only local, administrator-provisioned public keys establish trust.
+static bool trusted_keys(std::map<std::string, std::string> *keys, std::string *error)
 {
-  if (url.empty())
+  struct stat st;
+  if (!trusted_keys_dir || trusted_keys_dir[0] != '/' ||
+      lstat(trusted_keys_dir, &st) || !S_ISDIR(st.st_mode) ||
+      st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
+  { *error= "trusted_keys_dir must be an absolute, root-owned directory without group/other write access"; return false; }
+  DIR *dir= opendir(trusted_keys_dir);
+  if (!dir) { *error= "Cannot open trusted_keys_dir"; return false; }
+  std::vector<std::string> paths;
+  while (struct dirent *entry= readdir(dir))
   {
-    *error= "Set banquise_agent_catalog_url to an HTTPS catalog";
-    return false;
+    std::string name= entry->d_name;
+    if (name.size() > 4 && name.substr(name.size() - 4) == ".pub")
+      paths.push_back(std::string(trusted_keys_dir) + "/" + name);
   }
-  std::string body, signature, public_key;
-  if (!fetch(url, MAX_CATALOG_BYTES, &body, error)) return false;
-  if (!fetch(url + ".minisig", MAX_SIGNATURE_BYTES,
-             &signature, error))
+  closedir(dir);
+  if (paths.size() > 128) { *error= "At most 128 trusted .pub keys are supported"; return false; }
+  std::sort(paths.begin(), paths.end());
+  for (const auto &path : paths)
   {
-    *error= "Cannot download catalog signature: " + *error;
-    return false;
+    std::string text;
+    if (!read_trusted_key(&text, error, path.c_str())) return false;
+    auto lines= text_lines(text);
+    std::vector<unsigned char> packet;
+    if (lines.size() != 2 || !decode_base64(lines[1], 42, &packet) ||
+        packet[0] != 'E' || packet[1] != 'd')
+    { *error= "Invalid Minisign public key: " + path; return false; }
+    static const char hex[]= "0123456789abcdef";
+    std::string id;
+    for (size_t i= 2; i < 10; ++i)
+    { id+= hex[packet[i] >> 4]; id+= hex[packet[i] & 15]; }
+    if (!keys->emplace(id, path).second)
+    { *error= "Duplicate trusted key ID: " + id; return false; }
   }
-  if (!read_trusted_key(&public_key, error) ||
-      !verify_minisign(body, signature, public_key, error)) return false;
-  std::vector<Repo_entry> parsed;
-  if (!parse_catalog(body, &parsed, error)) return false;
+  return true;
+}
+
+static bool key_ids_json(std::string *json, std::string *error)
+{
+  std::map<std::string, std::string> keys;
+  if (!trusted_keys(&keys, error)) return false;
+  *json= "[";
+  for (const auto &key : keys)
   {
-    std::lock_guard<std::mutex> guard(repo_lock);
-    entries.swap(parsed);
+    if (json->size() > 1) *json+= ',';
+    *json+= "\"" + key.first + "\"";
   }
+  *json+= ']';
+  return true;
+}
+
+static bool refresh_repositories(const std::vector<Banquise_repository> &repos,
+                                 std::string *error)
+{
+  std::vector<Banquise_repository> resolved= repos;
+  std::map<std::string, std::string> keys;
+  if (!repos.empty() && !trusted_keys(&keys, error)) return false;
+  for (auto &repo : resolved)
+  {
+    auto key= keys.find(repo.key);
+    if (key == keys.end())
+    { *error= "Untrusted catalog key ID for repository '" + repo.name + "'"; return false; }
+    repo.key= key->second;
+  }
+  std::vector<Repo_entry> combined;
+  auto load= [](const Banquise_repository &repo, std::vector<Repo_entry> *parsed,
+                std::string *error) {
+    std::string body, signature, public_key;
+    return read_trusted_key(&public_key, error, repo.key.c_str()) &&
+      fetch(repo.url, MAX_CATALOG_BYTES, &body, error) &&
+      fetch(repo.url + ".minisig", MAX_SIGNATURE_BYTES, &signature, error) &&
+      verify_minisign(body, signature, public_key, error) &&
+      parse_catalog(body, parsed, error);
+  };
+  if (!repo_load_entries(resolved, &combined, load, error)) return false;
+  std::lock_guard<std::mutex> guard(repo_lock);
+  entries.swap(combined);
   return true;
 }
 
 static bool refresh(std::string *error)
 {
-  return refresh_from(catalog_url ? catalog_url : "", error);
+  std::vector<Banquise_repository> repos;
+  { std::lock_guard<std::mutex> guard(repo_lock); repos= controller_repositories; }
+  return refresh_repositories(repos, error);
 }
 
 static std::string local_architecture()
@@ -735,22 +796,18 @@ static bool sql_soname(const char *command, const std::string &soname,
 }
 
 static bool catalog_entry(const std::string &name, Repo_entry *selected,
-                          std::string *error)
+                          std::string *error, const std::string &catalog= "")
 {
   std::lock_guard<std::mutex> guard(repo_lock);
-  for (const Repo_entry &e : entries)
-    if (e.name == name && compatible(e))
-    {
-      *selected= e;
-      if (e.soname == "banquise_agent.so" || e.soname == "banquise_lite.so")
-      {
-        *error= "Banquise Agent cannot manage itself or banquise_lite";
-        return false;
-      }
-      return true;
-    }
-  *error= "No compatible catalog entry named '" + name + "'";
-  return false;
+  const Repo_entry *entry= repo_select_entry(entries, name, catalog, compatible, error);
+  if (!entry) return false;
+  *selected= *entry;
+  if (entry->soname == "banquise_lite.so" || entry->soname == "banquise_agent.so")
+  {
+    *error= "Banquise cannot manage itself or the other Banquise module";
+    return false;
+  }
+  return true;
 }
 
 static std::string metadata_path(const std::string &soname)
@@ -760,7 +817,8 @@ static std::string metadata_path(const std::string &soname)
 }
 
 static bool read_installed_version(const std::string &soname,
-                                   std::string *version)
+                                   std::string *version,
+                                   std::string *sha256= NULL)
 {
   int fd= open(metadata_path(soname).c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) return false;
@@ -772,6 +830,16 @@ static bool read_installed_version(const std::string &soname,
   size_t version_length= newline ? (size_t) (newline - data) : (size_t) length;
   if (!version_length || version_length > 255) return false;
   version->assign(data, version_length);
+  if (sha256)
+  {
+    sha256->clear();
+    if (newline)
+    {
+      const char *start= newline + 1;
+      const char *end= static_cast<const char *>(memchr(start, '\n', data + length - start));
+      if (end && end - start == 64) sha256->assign(start, 64);
+    }
+  }
   return true;
 }
 
@@ -780,7 +848,7 @@ static bool write_installed_metadata(const Repo_entry &entry,
 {
   std::string final_path= metadata_path(entry.soname);
   std::string temp_path= final_path + ".tmp";
-  std::string content= entry.version + "\n" + entry.sha256 + "\n";
+  std::string content= entry.version + "\n" + entry.sha256 + "\n" + entry.catalog + "\n";
   int fd= open(temp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
   if (fd < 0)
   {
@@ -843,11 +911,11 @@ static bool loaded_version(const std::string &soname, std::string *version)
 }
 
 static bool install(const std::string &name, std::string *error,
-                    std::string *notice)
+                    std::string *notice, const std::string &catalog= "")
 {
   std::lock_guard<std::mutex> operation_guard(operation_lock);
   Repo_entry selected;
-  if (!catalog_entry(name, &selected, error)) return false;
+  if (!catalog_entry(name, &selected, error, catalog)) return false;
 
   std::string path= std::string(opt_plugin_dir) + FN_LIBCHAR + selected.soname;
   struct stat st;
@@ -859,10 +927,11 @@ static bool install(const std::string &name, std::string *error,
               path;
       return false;
     }
-    std::string installed_version, runtime_version;
+    std::string installed_version, runtime_version, installed_sha256;
     bool is_loaded= loaded_version(selected.soname, &runtime_version);
-    bool trusted= read_installed_version(selected.soname, &installed_version);
-    if (trusted && installed_version == selected.version)
+    bool trusted= read_installed_version(selected.soname, &installed_version, &installed_sha256);
+    if (trusted && installed_version == selected.version &&
+        installed_sha256 == selected.sha256)
     {
       if (is_loaded)
       {
@@ -910,11 +979,11 @@ static bool install(const std::string &name, std::string *error,
 }
 
 static bool uninstall(const std::string &name, std::string *error,
-                      std::string *notice)
+                      std::string *notice, const std::string &catalog= "")
 {
   std::lock_guard<std::mutex> operation_guard(operation_lock);
   Repo_entry selected;
-  if (!catalog_entry(name, &selected, error)) return false;
+  if (!catalog_entry(name, &selected, error, catalog)) return false;
   std::string ignored_version;
   if (loaded_version(selected.soname, &ignored_version) &&
       !sql_soname("UNINSTALL", selected.soname, error)) return false;
@@ -937,11 +1006,11 @@ static bool uninstall(const std::string &name, std::string *error,
 }
 
 static bool update(const std::string &name, std::string *error,
-                   std::string *notice)
+                   std::string *notice, const std::string &catalog= "")
 {
   std::lock_guard<std::mutex> operation_guard(operation_lock);
   Repo_entry selected;
-  if (!catalog_entry(name, &selected, error)) return false;
+  if (!catalog_entry(name, &selected, error, catalog)) return false;
 
   std::string final_path= std::string(opt_plugin_dir) + FN_LIBCHAR + selected.soname;
   std::string backup_path= final_path + ".banquise-agent.backup";
@@ -951,13 +1020,13 @@ static bool update(const std::string &name, std::string *error,
     *error= "Installed plugin file is missing or is not a regular file";
     return false;
   }
-  std::string installed_version;
+  std::string installed_version, installed_sha256;
   std::string runtime_version;
   bool was_loaded= loaded_version(selected.soname, &runtime_version);
-  read_installed_version(selected.soname, &installed_version);
+  read_installed_version(selected.soname, &installed_version, &installed_sha256);
   if (installed_version.empty())
     installed_version= runtime_version;
-  if (installed_version == selected.version)
+  if (installed_version == selected.version && installed_sha256 == selected.sha256)
   {
     *notice= selected.name + " " + selected.version +
              " is already installed; no download or update was needed";
@@ -1026,11 +1095,11 @@ static bool update(const std::string &name, std::string *error,
 }
 
 static bool load_plugin(const std::string &name, std::string *error,
-                        std::string *notice)
+                        std::string *notice, const std::string &catalog= "")
 {
   std::lock_guard<std::mutex> operation_guard(operation_lock);
   Repo_entry selected;
-  if (!catalog_entry(name, &selected, error)) return false;
+  if (!catalog_entry(name, &selected, error, catalog)) return false;
   std::string path= std::string(opt_plugin_dir) + FN_LIBCHAR + selected.soname;
   struct stat st;
   if (lstat(path.c_str(), &st) || !S_ISREG(st.st_mode))
@@ -1105,20 +1174,6 @@ static bool read_enrollment_token(std::string *token, std::string *error)
   return !token->empty();
 }
 
-static std::string key_id()
-{
-  std::string text, error;
-  if (!read_trusted_key(&text, &error)) return "";
-  std::vector<std::string> lines= text_lines(text);
-  std::vector<unsigned char> packet;
-  if (lines.size() != 2 || !decode_base64(lines[1], 42, &packet)) return "";
-  static const char hex[]= "0123456789abcdef";
-  std::string result;
-  for (size_t i= 2; i < 10; ++i)
-  { result+= hex[packet[i] >> 4]; result+= hex[packet[i] & 15]; }
-  return result;
-}
-
 static std::string operating_system()
 {
   struct utsname info;
@@ -1145,7 +1200,7 @@ static std::string plugin_report()
     if (version.empty()) version= runtime_version;
     if (!first) result+= ',';
     first= false;
-    result+= "{\"name\":\"" + json_escape(entry.name) + "\",\"installed\":" +
+    result+= "{\"name\":\"" + json_escape(entry.name) + "\",\"catalog_name\":\"" + json_escape(entry.catalog) + "\",\"installed\":" +
       (installed ? "true" : "false") + ",\"loaded\":" + (loaded ? "true" : "false") +
       ",\"managed\":" + (managed ? "true" : "false") +
       ",\"installed_version\":\"" + json_escape(version) + "\"}";
@@ -1172,13 +1227,14 @@ static bool ensure_agent_identity(std::string *error)
     for (unsigned char c : random) { agent_uid+= hex[c >> 4]; agent_uid+= hex[c & 15]; }
   }
   if (!safe_name(agent_uid)) { *error= "Unsafe server UID"; return false; }
-  std::string enrollment, response;
+  std::string enrollment, response, key_ids;
+  if (!key_ids_json(&key_ids, error)) return false;
   if (!read_enrollment_token(&enrollment, error)) return false;
   std::string body= "{\"server_uid\":\"" + json_escape(agent_uid) +
     "\",\"mariadb_version\":\"" + json_escape(server_version) +
     "\",\"os\":\"" + json_escape(operating_system()) +
     "\",\"architecture\":\"" + local_architecture() +
-    "\",\"catalog_key_id\":\"" + key_id() + "\"}";
+    "\",\"catalog_key_ids\":" + key_ids + "}";
   long code= 0;
   if (!controller_post("/api/v1/agents/register", body, enrollment, true,
                        &response, &code, error)) return false;
@@ -1215,9 +1271,33 @@ static bool process_poll_response(const std::string &response, std::string *erro
   std::string status;
   if (!json_string_field(response.data(), (int) response.size(), "status",
                          &status, true, error)) return false;
-  std::string url;
-  if (!json_string_field(response.data(), (int) response.size(), "catalog_url",
-                         &url, true, error) || !refresh_from(url, error)) return false;
+  std::vector<Banquise_repository> repos;
+  const char *catalogs= NULL;
+  int catalogs_length= 0;
+  if (json_get_object_key(response.data(), response.data() + response.size(),
+                          "catalogs", &catalogs, &catalogs_length) != JSV_ARRAY)
+  { *error= "Controller catalogs must be an array"; return false; }
+  std::map<std::string, bool> names;
+  for (int i= 0;; ++i)
+  {
+    const char *object= NULL;
+    int length= 0;
+    auto type= json_get_array_item(catalogs, catalogs + catalogs_length, i, &object, &length);
+    if (type == JSV_NOTHING) break;
+    Banquise_repository repo;
+    if (i >= 128 || type != JSV_OBJECT ||
+        !json_string_field(object, length, "name", &repo.name, true, error) ||
+        !json_string_field(object, length, "url", &repo.url, true, error) ||
+        !json_string_field(object, length, "key_id", &repo.key, true, error))
+    { *error= "Invalid controller catalog descriptor"; return false; }
+    if (!repo_name_valid(repo.name) || !https_url(repo.url) || repo.key.size() != 16 ||
+        repo.key.find_first_not_of("0123456789abcdef") != std::string::npos ||
+        !names.emplace(repo.name, true).second)
+    { *error= "Invalid or duplicate controller repository"; return false; }
+    repos.push_back(repo);
+  }
+  if (!refresh_repositories(repos, error)) return false;
+  { std::lock_guard<std::mutex> guard(repo_lock); controller_repositories= repos; }
   if (status != "active")
   {
     set_message("Agent is " + status + "; catalog prepared, no tasks accepted");
@@ -1235,20 +1315,22 @@ static bool process_poll_response(const std::string &response, std::string *erro
     if (type == JSV_NOTHING) break;
     if (type != JSV_OBJECT)
     { *error= "Every controller task must be an object"; return false; }
-    std::string action, plugin;
+    std::string action, plugin, task_catalog;
     const char *id_value= NULL;
     int id_length= 0;
     if (!json_string_field(object, object_length, "action", &action, true, error) ||
         !json_string_field(object, object_length, "plugin_name", &plugin, true, error) ||
+        !json_string_field(object, object_length, "catalog_name", &task_catalog, true, error) ||
         json_get_object_key(object, object + object_length, "id", &id_value, &id_length) != JSV_NUMBER)
       return false;
     long long id= strtoll(std::string(id_value, (size_t) id_length).c_str(), NULL, 10);
     std::string operation_error, notice;
     bool success= false;
-    if (action == "install") success= install(plugin, &operation_error, &notice);
-    else if (action == "update") success= update(plugin, &operation_error, &notice);
-    else if (action == "uninstall") success= uninstall(plugin, &operation_error, &notice);
-    else if (action == "load") success= load_plugin(plugin, &operation_error, &notice);
+    if (!names.count(task_catalog)) operation_error= "Task repository is not assigned to this agent";
+    else if (action == "install") success= install(plugin, &operation_error, &notice, task_catalog);
+    else if (action == "update") success= update(plugin, &operation_error, &notice, task_catalog);
+    else if (action == "uninstall") success= uninstall(plugin, &operation_error, &notice, task_catalog);
+    else if (action == "load") success= load_plugin(plugin, &operation_error, &notice, task_catalog);
     else operation_error= "Unsupported controller action";
     std::string result= success ? notice : operation_error;
     std::string ack_error;
@@ -1262,10 +1344,12 @@ static void agent_cycle()
 {
   std::string error;
   if (!ensure_agent_identity(&error)) { set_message("Registration failed: " + error); return; }
+  std::string key_ids;
+  if (!key_ids_json(&key_ids, &error)) { set_message("Trust configuration failed: " + error); return; }
   std::string body= "{\"mariadb_version\":\"" + json_escape(server_version) +
     "\",\"os\":\"" + json_escape(operating_system()) +
     "\",\"architecture\":\"" + local_architecture() +
-    "\",\"last_error\":\"\",\"plugins\":" + plugin_report() + "}";
+    "\",\"catalog_key_ids\":" + key_ids + ",\"last_error\":\"\",\"plugins\":" + plugin_report() + "}";
   std::string response;
   long code= 0;
   std::string path= "/api/v1/agents/" + agent_uid + "/poll";
@@ -1298,24 +1382,36 @@ static void agent_main()
 static int check_refresh(MYSQL_THD opaque_thd, st_mysql_sys_var *, void *save,
                          st_mysql_value *value)
 {
-  *static_cast<my_bool *>(save)= 1;
+  *static_cast<my_bool *>(save)= 0;
   THD *thd= static_cast<THD *>(opaque_thd);
   if (check_global_access(thd, SUPER_ACL, true)) return 1;
   long long requested= 0;
-  if (value->val_int(value, &requested) || !requested) return 0;
+  if (value->value_type(value) == MYSQL_VALUE_TYPE_STRING)
+  {
+    char buffer[16];
+    int length= sizeof(buffer);
+    const char *text= value->val_str(value, buffer, &length);
+    if (!text) return 1;
+    std::string option(text, length);
+    std::transform(option.begin(), option.end(), option.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if (option == "on" || option == "1") requested= 1;
+    else if (option != "off" && option != "0") return 1;
+  }
+  else if (value->val_int(value, &requested) || (requested != 0 && requested != 1))
+    return 1;
+  if (!requested) return 0;
+  *static_cast<my_bool *>(save)= 1;
   std::string error;
   if (!refresh(&error)) { set_message("Refresh failed: " + error); return 1; }
   set_message("Catalog refreshed successfully");
   return 0;
 }
 
-static MYSQL_SYSVAR_STR(catalog_url, catalog_url,
-  PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC,
-  "Optional manual HTTPS URL of the signed plugin catalog", NULL, NULL, "");
-static MYSQL_SYSVAR_STR(trusted_key_file, trusted_key_file,
+static MYSQL_SYSVAR_STR(trusted_keys_dir, trusted_keys_dir,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY | PLUGIN_VAR_MEMALLOC,
-  "Local Minisign public key used to authenticate catalogs", NULL, NULL,
-  "/etc/mariadb/banquise/catalog.pub");
+  "Directory of administrator-provisioned trusted Minisign .pub keys", NULL, NULL,
+  "/etc/mariadb/banquise/trusted.d");
 static MYSQL_SYSVAR_STR(controller_url, controller_url,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY | PLUGIN_VAR_MEMALLOC,
   "Banquise control-plane HTTPS base URL", NULL, NULL, "");
@@ -1341,7 +1437,7 @@ static MYSQL_SYSVAR_ULONG(transfer_timeout, repo_transfer_timeout, PLUGIN_VAR_RQ
 static MYSQL_SYSVAR_BOOL(refresh, refresh_command, PLUGIN_VAR_OPCMDARG,
   "Set to ON to refresh the catalog", check_refresh, NULL, 0);
 static st_mysql_sys_var *repo_vars[]= {
-  MYSQL_SYSVAR(catalog_url), MYSQL_SYSVAR(trusted_key_file), MYSQL_SYSVAR(controller_url),
+  MYSQL_SYSVAR(trusted_keys_dir), MYSQL_SYSVAR(controller_url),
   MYSQL_SYSVAR(enrollment_token_file), MYSQL_SYSVAR(state_file), MYSQL_SYSVAR(server_uid),
   MYSQL_SYSVAR(enabled), MYSQL_SYSVAR(poll_interval), MYSQL_SYSVAR(connect_timeout),
   MYSQL_SYSVAR(transfer_timeout), MYSQL_SYSVAR(refresh), NULL
@@ -1419,6 +1515,7 @@ static std::string join(const std::vector<std::string> &items)
 namespace Show {
 static ST_FIELD_INFO fields[]= {
   Column("NAME", Varchar(128), NOT_NULL),
+  Column("CATALOG", Varchar(128), NOT_NULL),
   Column("REPOSITORY", Varchar(1024), NOT_NULL),
   Column("PLUGIN_VERSION", Varchar(64), NOT_NULL),
   Column("INSTALLED", Varchar(3), NOT_NULL),
@@ -1468,7 +1565,7 @@ static int fill_table(THD *thd, TABLE_LIST *tables, COND *)
     std::string plugin_types= is_loaded ? join(loaded->second.types) : e.plugin_types;
     std::string license= is_loaded ? join(loaded->second.licenses) : e.license;
     std::string maturity= is_loaded ? join(loaded->second.maturities) : e.maturity;
-    const std::string values[]= { e.name, e.repository, e.version,
+    const std::string values[]= { e.name, e.catalog, e.repository, e.version,
       is_installed ? "YES" : "NO", is_loaded ? "YES" : "NO",
       installed_version, plugin_types, license, maturity, e.description,
       e.mariadb_version, e.architecture, e.soname, e.download_url, e.sha256,
@@ -1525,8 +1622,8 @@ class Item_func_banquise_agent_action : public Item_str_func
   bool succeeded= false;
   std::string result;
 public:
-  Item_func_banquise_agent_action(THD *thd, Item *arg, Repo_action action_arg):
-    Item_str_func(thd, arg), action(action_arg) {}
+  Item_func_banquise_agent_action(THD *thd, List<Item> &list, Repo_action action_arg):
+    Item_str_func(thd, list), action(action_arg) {}
 
   LEX_CSTRING func_name_cstring() const override
   {
@@ -1564,16 +1661,26 @@ public:
         result= "Plugin name must not be NULL";
       else
       {
-        std::string name(arg->ptr(), arg->length()), error, notice;
-        if (!safe_name(name))
+        std::string name(arg->ptr(), arg->length()), error, notice, catalog;
+        StringBuffer<256> repo_buffer;
+        String *repo_arg= arg_count == 2 ? args[1]->val_str(&repo_buffer) : NULL;
+        bool valid_repo= arg_count == 1;
+        if (repo_arg && !args[1]->null_value)
+        {
+          catalog.assign(repo_arg->ptr(), repo_arg->length());
+          valid_repo= repo_name_valid(catalog);
+        }
+        if (!valid_repo)
+          result= "Invalid or NULL repository name";
+        else if (!safe_name(name))
           result= "Invalid plugin name";
         else
         {
           switch (action)
           {
-          case ACTION_INSTALL: succeeded= install(name, &error, &notice); break;
-          case ACTION_UNINSTALL: succeeded= uninstall(name, &error, &notice); break;
-          case ACTION_UPDATE: succeeded= update(name, &error, &notice); break;
+          case ACTION_INSTALL: succeeded= install(name, &error, &notice, catalog); break;
+          case ACTION_UNINSTALL: succeeded= uninstall(name, &error, &notice, catalog); break;
+          case ACTION_UPDATE: succeeded= update(name, &error, &notice, catalog); break;
           }
           result= succeeded ? notice : error;
         }
@@ -1607,11 +1714,18 @@ public:
 };
 
 template <Repo_action action> class Create_func_banquise_agent_action :
-  public Create_func_arg1
+  public Create_native_func
 {
 public:
-  Item *create_1_arg(THD *thd, Item *arg) override
-  { return new (thd->mem_root) Item_func_banquise_agent_action(thd, arg, action); }
+  Item *create_native(THD *thd, const LEX_CSTRING *name, List<Item> *list) override
+  {
+    if (!list || list->elements < 1 || list->elements > 2)
+    {
+      my_error(ER_WRONG_PARAMCOUNT_TO_NATIVE_FCT, MYF(0), name->str);
+      return NULL;
+    }
+    return new (thd->mem_root) Item_func_banquise_agent_action(thd, *list, action);
+  }
   static Create_func_banquise_agent_action singleton;
 };
 

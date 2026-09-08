@@ -6,6 +6,7 @@ BANQUISE_CATALOG	ACTIVE	INFORMATION SCHEMA
 SHOW COLUMNS FROM INFORMATION_SCHEMA.BANQUISE_CATALOG;
 Field	Type	Null	Key	Default	Extra
 NAME	varchar(128)	NO		NULL	
+CATALOG	varchar(128)	NO		NULL	
 REPOSITORY	varchar(1024)	NO		NULL	
 PLUGIN_VERSION	varchar(64)	NO		NULL	
 INSTALLED	varchar(3)	NO		NULL	
@@ -29,7 +30,6 @@ Variable_name	Value
 Banquise_agent_message	Agent is disabled
 SHOW VARIABLES LIKE 'banquise_agent_%';
 Variable_name	Value
-banquise_agent_catalog_url	
 banquise_agent_connect_timeout	10
 banquise_agent_controller_url	
 banquise_agent_enabled	OFF
@@ -39,4 +39,10 @@ banquise_agent_refresh	OFF
 banquise_agent_server_uid	
 banquise_agent_state_file	/var/lib/mysql/banquise-agent.state
 banquise_agent_transfer_timeout	120
-banquise_agent_trusted_key_file	/etc/mariadb/banquise/catalog.pub
+banquise_agent_trusted_keys_dir	/etc/mariadb/banquise/trusted.d
+SELECT banquise_agent_install('vmstat', 'community');
+ERROR HY000: BANQUISE_AGENT: No compatible catalog entry named 'vmstat'
+SELECT banquise_agent_install('vmstat', NULL);
+ERROR HY000: BANQUISE_AGENT: Invalid or NULL repository name
+SELECT banquise_agent_install('vmstat', '');
+ERROR HY000: BANQUISE_AGENT: Invalid or NULL repository name

@@ -1,0 +1,12 @@
+SET GLOBAL banquise_agent_refresh=ON;
+SHOW STATUS LIKE 'banquise_agent_message';
+Variable_name	Value
+Banquise_agent_message	Catalog refreshed successfully
+SET GLOBAL banquise_agent_refresh=ON;
+SHOW STATUS LIKE 'banquise_agent_message';
+Variable_name	Value
+Banquise_agent_message	Catalog refreshed successfully
+SELECT COUNT(*) FROM information_schema.BANQUISE_CATALOG;
+COUNT(*)
+0
+SET GLOBAL banquise_agent_refresh=OFF;
