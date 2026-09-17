@@ -548,9 +548,9 @@ static bool trusted_keys(std::map<std::string, std::string> *keys, std::string *
   {
     std::string text;
     if (!read_trusted_key(&text, error, path.c_str())) return false;
-    auto lines= text_lines(text);
+    auto lines= banquise_text_lines(text);
     std::vector<unsigned char> packet;
-    if (lines.size() != 2 || !decode_base64(lines[1], 42, &packet) ||
+    if (lines.size() != 2 || !banquise_decode_base64(lines[1], 42, &packet) ||
         packet[0] != 'E' || packet[1] != 'd')
     { *error= "Invalid Minisign public key: " + path; return false; }
     static const char hex[]= "0123456789abcdef";
