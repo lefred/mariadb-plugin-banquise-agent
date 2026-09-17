@@ -22,6 +22,10 @@ may share plugin names; every task identifies its repository explicitly.
 The agent does not read local `[banquise:name]` sections. Those sections belong
 to Banquise Lite. Provision trusted public keys locally instead:
 
+The shared repository configuration parser accepts `enabled=1` (the default)
+and `enabled=0`; this setting is used by Banquise Lite. Agent catalog
+assignments are enabled or disabled centrally in Banquise Server.
+
 ```ini
 [mariadb]
 banquise_agent_trusted_keys_dir=/etc/mariadb/banquise/trusted.d
@@ -56,10 +60,13 @@ Enrollment and each heartbeat report `catalog_key_ids`. The server sends:
 }
 ```
 
-All assigned catalogs must verify before any task executes. Unknown keys,
-duplicate repository names, and tasks for unassigned repositories are rejected.
-An empty assignment list clears the catalog view. SQL refresh uses the latest
-assignments received from the server; it never discovers catalog URLs locally.
+Assigned catalogs are refreshed independently. A catalog that has a DNS,
+network, key, signature, or parsing failure is skipped while available catalogs
+remain usable; if every assigned catalog fails, the refresh fails and the
+previous catalog view is retained. Unknown keys, duplicate repository names,
+and tasks for unassigned repositories are rejected. An empty assignment list
+clears the catalog view. SQL refresh uses the latest assignments received from
+the server; it never discovers catalog URLs locally.
 
 ```sql
 SELECT CATALOG, NAME FROM information_schema.BANQUISE_CATALOG;
@@ -83,7 +90,7 @@ cmake -S . -B build -DPLUGIN_BANQUISE_AGENT=DYNAMIC
 cmake --build build --target banquise_agent
 ```
 
-Dependencies are libcurl, libarchive, and OpenSSL development headers.
+Dependencies are libcurl and libarchive development headers. OpenSSL is used when available; MariaDB builds using bundled wolfSSL automatically use the native wolfCrypt verifier. Set `-DBANQUISE_AGENT_CRYPTO_BACKEND=OPENSSL` or `WOLFSSL` to select explicitly.
 
 ## Configuration
 
